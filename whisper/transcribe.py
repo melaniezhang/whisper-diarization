@@ -81,6 +81,7 @@ def transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
+    # create a log mel spectogram from the audio file.
     mel = log_mel_spectrogram(audio)
 
     if decode_options.get("language", None) is None:
@@ -171,15 +172,40 @@ def transcribe(
     num_frames = mel.shape[-1]
     previous_seek_value = seek
 
+    # what this loop does:
+    # 1. seek to obtain the next segment of the audio (mel spectrogram frames): 3000 frames, i think this
+    #    corresponds to 30 seconds of audio
+    # 2. decode the segment. the result will contain a list of tokens and some other metadata.
+    #    if the decode result's no_speech_prob is greater than a threshold, skip this segment (continue)
+    # 3. else, process the tokens:
+    #    - filter the token list to just timestamp tokens
+    #    - split up the segment by timestamps. e.g. [time A, textA, time B, textB] -> [timeA, textA], [timeB, textB]
+    #    - for each timestamp's segment, add segment to the result. segment: {start, end, text_tokens, decoder result}
+
+
+    """
+    problem: if the segment contained multiple sentences, each sentence is mapped to the same 30 second result.
+    the result consists of the audio features, tokens, etc.
+    we want to be able to attribute the sentence to its own audio features?
+    possible solutions:
+    1. take the timestamp output and translate that to a segment of the mel spectrogram. then use that to perform
+       k means clustering.
+    2. in the decoder itself provide mapping of token to audio feature?
+       need to figure out what dimensionality the audio features are, and how they correspond to tokens.
+    """
     with tqdm.tqdm(total=num_frames, unit='frames', disable=verbose is not False) as pbar:
         while seek < num_frames:
             timestamp_offset = float(seek * HOP_LENGTH / SAMPLE_RATE)
+            # trim the current segment to the number of frames expected by the encoder (3000)
             segment = pad_or_trim(mel[:, seek:], N_FRAMES).to(model.device).to(dtype)
             segment_duration = segment.shape[-1] * HOP_LENGTH / SAMPLE_RATE
 
             decode_options["prompt"] = all_tokens[prompt_reset_since:]
+            # decode the 3000 sample segment.
             result: DecodingResult = decode_with_fallback(segment)
+            # type List[int]
             tokens = torch.tensor(result.tokens)
+            # the tokens include timestamp tokens -- special tokens above a certain ID range.
 
             if no_speech_threshold is not None:
                 # no voice activity check
@@ -191,10 +217,11 @@ def transcribe(
                 if should_skip:
                     seek += segment.shape[-1]  # fast-forward to the next segment boundary
                     continue
-
+            # get all tokens whose id is greater than the special timestamp_begin token
             timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
             consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0].add_(1)
             if len(consecutive) > 0:  # if the output contains two consecutive timestamp tokens
+                # i think this means that the input segment was broken into 2+ sentences
                 last_slice = 0
                 for current_slice in consecutive:
                     sliced_tokens = tokens[last_slice:current_slice]
@@ -204,6 +231,7 @@ def transcribe(
                     end_timestamp_position = (
                         sliced_tokens[-1].item() - tokenizer.timestamp_begin
                     )
+                    # one segment is one timestamp range + the transcribed text for that range!
                     add_segment(
                         start=timestamp_offset + start_timestamp_position * time_precision,
                         end=timestamp_offset + end_timestamp_position * time_precision,
@@ -243,7 +271,7 @@ def transcribe(
             pbar.update(min(num_frames, seek) - previous_seek_value)
             previous_seek_value = seek
 
-    return dict(text=tokenizer.decode(all_tokens[len(initial_prompt):]), segments=all_segments, language=language)
+    return dict(text=tokenizer.decode(all_tokens[len(initial_prompt):]), segments=all_segments, language=language, mel=mel)
 
 
 def cli():
