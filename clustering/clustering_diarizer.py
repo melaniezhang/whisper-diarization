@@ -73,7 +73,7 @@ def get_annotation(segments: List[AudioSegment], speaker_labels: List[int], file
     return hypothesis
 
 
-class KMeansDiarizer():
+class ClusteringDiarizer():
     def __init__(self, verbose=False):
         self.whisper_model = whisper.load_model("small")
         self.verbose = verbose
@@ -116,7 +116,7 @@ class KMeansDiarizer():
           print(f'Last 5 intervals: {intervals_s[len(intervals_s) - 5:]}')
         return (mfcc, intervals_s)
 
-    def predict(self, audio_file: str, k=2, method="AVERAGE_POOL"):
+    def predict_kmeans(self, audio_file: str, num_speakers=2, method="AVERAGE_POOL"):
       """
       Given an input audio file and number of speakers, predict a diarization
       using the requested `method`, using K-means clustering.
@@ -138,9 +138,9 @@ class KMeansDiarizer():
           mfcc = librosa.feature.mfcc(y=y, n_mfcc=13, sr=SAMPLE_RATE, hop_length=HOP_LENGTH)
           if method == "AVERAGE_POOL":
             segment_feature = np.mean(mfcc, axis=1)
-          # to do: add variance / min / max pooling
+          # TODO(Melanie): try out variance / min / max pooling
           segment_features.append(segment_feature)
-      kmeans = KMeans(n_clusters=k, random_state=42)
+      kmeans = KMeans(n_clusters=num_speakers, random_state=42)
       kmeans.fit(segment_features)
       segments_with_labels = zip(segments, kmeans.labels_)
       if (self.verbose):
@@ -152,9 +152,15 @@ class KMeansDiarizer():
         print(output_annotation.to_rttm())
       return output_annotation
 
+    def predict_spectral(self, audio_file: str, num_speakers=2):
+        """
+        TODO(Andrew): fill out. Ouput should be a pyannote.core.Annotation object, like in the kmeans predictor.
+        """
+        pass
+
 if __name__ == "__main__":
   audio_file = "../tests/melzh/hailey-bieber-interview.mp3"
   if IS_COLAB:
       audio_file = '/content/drive/MyDrive/cs229-final-project/whisper-diarization/tests/melzh/hailey-bieber-interview.mp3'
-  diarizer = KMeansDiarizer()
-  diarizer.predict(audio_file)
+  diarizer = ClusteringDiarizer(verbose=True)
+  diarizer.predict_kmeans(audio_file)
