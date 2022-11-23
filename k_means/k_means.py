@@ -1,3 +1,5 @@
+import sys
+
 import librosa
 import torch
 from sklearn.cluster import KMeans
@@ -12,6 +14,7 @@ from pyannote.core import Annotation, Segment
 
 HOP_LENGTH = 512
 SAMPLE_RATE = 22050
+IS_COLAB = "google.colab" in sys.modules
 
 class AudioSegment():
     def __init__(self, mel: torch.Tensor, start_time: float, end_time: float, text: str):
@@ -71,8 +74,9 @@ def get_annotation(segments: List[AudioSegment], speaker_labels: List[int], file
 
 
 class KMeansDiarizer():
-    def __init__(self):
+    def __init__(self, verbose=False):
         self.whisper_model = whisper.load_model("small")
+        self.verbose = verbose
 
     def get_audio_segments(self, audio_file: str):
         """
@@ -81,6 +85,7 @@ class KMeansDiarizer():
         """
         segment_list = []
         transcribe_result = whisper.transcribe(self.whisper_model, audio_file)
+        print("finished transcribing using Whisper model!")
         mel = transcribe_result['mel']
         for segment in transcribe_result['segments']:
             start_idx = time_to_idx(segment['start'])
@@ -103,61 +108,53 @@ class KMeansDiarizer():
         audio_length = len(y) / sr  # in seconds
         step = hop_length / sr  # in seconds
         intervals_s = np.arange(start=0, stop=audio_length, step=step)
-
-        print(f'audio length: {audio_length}')
-        print(f'MFCC shape: {mfcc.shape}')
-        print(f'intervals_s shape: {intervals_s.shape}')
-        print(f'First 5 intervals: {intervals_s[:5]}')
-        print(f'Last 5 intervals: {intervals_s[len(intervals_s) - 5:]}')
+        if (self.verbose):
+          print(f'audio length: {audio_length}')
+          print(f'MFCC shape: {mfcc.shape}')
+          print(f'intervals_s shape: {intervals_s.shape}')
+          print(f'First 5 intervals: {intervals_s[:5]}')
+          print(f'Last 5 intervals: {intervals_s[len(intervals_s) - 5:]}')
         return (mfcc, intervals_s)
 
-    def predict(self, audio_file: str):
-        # TRY #2:
-        # get mfccs for each audio segment. average them, and perform k-means clustering on the averages
-        segments = diarizer.get_audio_segments(audio_file)
-        segment_mfcc_averages = []
-        for segment in segments:
-            duration = segment.end_time - segment.start_time
-            y, sr = librosa.load(audio_file, offset=segment.start_time, duration=duration, sr=SAMPLE_RATE)
-            mfcc = librosa.feature.mfcc(y=y, n_mfcc=13, sr=SAMPLE_RATE, hop_length=HOP_LENGTH)
-            mfcc_avg = np.mean(mfcc, axis=1)
-            segment_mfcc_averages.append(mfcc_avg)
-        kmeans = KMeans(n_clusters=2, random_state=42)
-        # perform k means clustering on these features
-        kmeans.fit(segment_mfcc_averages)
-        segments_with_labels = zip(segments, kmeans.labels_)
+    def predict(self, audio_file: str, k=2, method="AVERAGE_POOL"):
+      """
+      Given an input audio file and number of speakers, predict a diarization
+      using the requested `method`, using K-means clustering.
+      Returns a pyannote.core.Annotation
+
+      Implemented `method`s:
+      AVERAGE_POOL: use Whisper model to segment the audio into speaker chunks.
+      For each segment, extract MFCCs and average them. Perform k-means clustering
+      on the segment MFCC averages.
+      """
+      allowed_methods = ["AVERAGE_POOL"]
+      if method not in allowed_methods:
+        raise NotImplementedError(f"No implementation for method {method}")
+      segments = self.get_audio_segments(audio_file)
+      segment_features = []
+      for segment in segments:
+          duration = segment.end_time - segment.start_time
+          y, sr = librosa.load(audio_file, offset=segment.start_time, duration=duration, sr=SAMPLE_RATE)
+          mfcc = librosa.feature.mfcc(y=y, n_mfcc=13, sr=SAMPLE_RATE, hop_length=HOP_LENGTH)
+          if method == "AVERAGE_POOL":
+            segment_feature = np.mean(mfcc, axis=1)
+          # to do: add variance / min / max pooling
+          segment_features.append(segment_feature)
+      kmeans = KMeans(n_clusters=k, random_state=42)
+      kmeans.fit(segment_features)
+      segments_with_labels = zip(segments, kmeans.labels_)
+      if (self.verbose):
         for segment_label in segments_with_labels:
             segment, label = segment_label
             print(f"[{segment.start_time}-{segment.end_time}] Speaker {label}: {segment.text}")
-        output_annotation = get_annotation(segments, kmeans.labels_, audio_file)
+      output_annotation = get_annotation(segments, kmeans.labels_, audio_file)
+      if (self.verbose):
         print(output_annotation.to_rttm())
-        return output_annotation
+      return output_annotation
 
-
-audio_file = "../tests/melzh/hailey-bieber-interview.mp3"
-diarizer = KMeansDiarizer()
-# use whisper model to produced segments (start, end, text) from the audio file
-
-# segment_indices = [segment.start_time for segment in segments]
-# print("sample indices: ", librosa.time_to_samples(segment_indices, sr=SAMPLE_RATE))
-
-# TRY #1: get mfccs for the entire audio file, and perform k-means clustering on each individual mfcc
-# get mfcc features
-def try_1():
-    segments = diarizer.get_audio_segments(audio_file)
-    mfccs, buckets_s = get_mfccs(audio_file)
-    kmeans = KMeans(n_clusters=3, random_state=42)
-    # perform k means clustering on these features
-    kmeans.fit(mfccs.T)
-    # loop through the segments and record all labels that were predicted for each mfcc in the segment
-    mfcc_idx = 0
-    segment_labels = []
-    for segment in segments:
-        segment_labels.append([])
-        end_time = segment.end_time
-        while mfcc_idx < len(buckets_s) and buckets_s[mfcc_idx] < end_time:
-            segment_labels[-1].append(kmeans.labels_[mfcc_idx])
-            mfcc_idx += 1
-    print(segment_labels)
-
-diarizer.predict(audio_file)
+if __name__ == "__main__":
+  audio_file = "../tests/melzh/hailey-bieber-interview.mp3"
+  if IS_COLAB:
+      audio_file = '/content/drive/MyDrive/cs229-final-project/whisper-diarization/tests/melzh/hailey-bieber-interview.mp3'
+  diarizer = KMeansDiarizer()
+  diarizer.predict(audio_file)
