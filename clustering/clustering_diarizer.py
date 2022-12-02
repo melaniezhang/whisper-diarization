@@ -2,6 +2,7 @@ import sys
 
 import librosa
 import torch
+from pyannote.metrics.diarization import DiarizationErrorRate
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 import numpy as np
@@ -72,19 +73,51 @@ def get_annotation(segments: List[AudioSegment], speaker_labels: List[int], file
         hypothesis[Segment(segment.start_time, segment.end_time)] = str(label)
     return hypothesis
 
+def process_rttm(rttm_file):
+    speaker_num = 0
+    speakers = {}
+    hypothesis = Annotation()
+    rttm_lines = []
+
+    with open(rttm_file, 'r') as rttm:
+        for line in rttm:
+            rttm_lines.append(line)
+            parts = line.split()
+            start_time = float(parts[3])
+            duration = float(parts[4])
+            end_time = start_time + duration
+            speaker = parts[7]
+            if speaker not in speakers:
+                speakers[speaker] = speaker_num
+                speaker_num += 1
+            speaker_id = speakers[speaker]
+            hypothesis[Segment(start_time, end_time)] = speaker_id
+    print("hypothesis.to_rttm:\n" + hypothesis.to_rttm())
+    return hypothesis, speaker_num
 
 class ClusteringDiarizer():
     def __init__(self, verbose=False):
         self.whisper_model = whisper.load_model("small")
         self.verbose = verbose
 
-    def get_audio_segments(self, audio_file: str):
+    def get_encoder_blocks(self, audio_file: str):
+        audio = whisper.load_audio(audio_file)
+        audio = whisper.pad_or_trim(audio)
+        mel = whisper.log_mel_spectrogram(audio).to(self.whisper_model.device)
+        mel = mel[None, :, :]
+        self.whisper_model.embed_audio(mel)  # self.encoder.forward(mel)
+        print("encoder states:", self.whisper_model.encoder.encoder_states)
+
+    def get_audio_segments(self, audio_file: str, prompt: str = ""):
         """
         Returns list of AudioSegments obtained by transcribing the given audio using a Whisper model.
         Each audio segment consists of the log-Mel spectrogram segment corresponding to the start & end times
         """
         segment_list = []
-        transcribe_result = whisper.transcribe(self.whisper_model, audio_file)
+        if prompt:
+            transcribe_result = whisper.transcribe(self.whisper_model, audio_file, prompt=prompt)
+        else:
+            transcribe_result = whisper.transcribe(self.whisper_model, audio_file)
         print("finished transcribing using Whisper model!")
         mel = transcribe_result['mel']
         for segment in transcribe_result['segments']:
@@ -92,6 +125,8 @@ class ClusteringDiarizer():
             end_idx = time_to_idx(segment['end'])
             audio_segment = AudioSegment(mel[:, start_idx:end_idx], segment['start'], segment['end'], segment['text'])
             segment_list.append(audio_segment)
+            if self.verbose:
+                print(f"[{audio_segment.start_time}-{audio_segment.end_time}] {audio_segment.text}")
         return segment_list
 
     def get_mfccs(self, audio_file: str):
@@ -115,6 +150,20 @@ class ClusteringDiarizer():
           print(f'First 5 intervals: {intervals_s[:5]}')
           print(f'Last 5 intervals: {intervals_s[len(intervals_s) - 5:]}')
         return (mfcc, intervals_s)
+
+    def predict_kmeans_meeting(self, meeting_name:str):
+        metric = DiarizationErrorRate()
+        # replace w/ folder u save the files to
+        path_prefix = '/Users/melaniezhang/Desktop/for_andrew'
+        rttm_file = f'{path_prefix}/{meeting_name}.rttm'
+        audio_path = f'{path_prefix}/{meeting_name}.wav'
+        transcription_path = f'{path_prefix}/{meeting_name}.txt'
+        with open(transcription_path, 'r') as transcription:
+          print("ground truth transcription:\n", transcription.read())
+        reference, n_speakers = process_rttm(rttm_file)
+        print(f"numspeakers : {n_speakers}")
+        hypothesis = self.predict_kmeans(audio_path, num_speakers=n_speakers)
+        print("DER = {0:.3f}".format(metric(reference, hypothesis)))
 
     def predict_kmeans(self, audio_file: str, num_speakers=2, method="AVERAGE_POOL"):
       """
@@ -163,4 +212,5 @@ if __name__ == "__main__":
   if IS_COLAB:
       audio_file = '/content/drive/MyDrive/cs229-final-project/whisper-diarization/tests/melzh/hailey-bieber-interview.mp3'
   diarizer = ClusteringDiarizer(verbose=True)
-  diarizer.predict_kmeans(audio_file)
+  # diarizer.predict_kmeans(audio_file)
+  print(diarizer.predict_kmeans_meeting("IS1009a-0"))
