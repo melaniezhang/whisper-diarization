@@ -212,7 +212,7 @@ class ClusteringDiarizer():
         pass
 
 
-def process_transcription(transcription_lines: List[str]):
+def process_transcription(transcription_lines: List[str], verbose=False):
     # returns AudioSegment list, speaker_num, and pyannote.Annotation from the transcription lines
     annotation = Annotation()
     segments = []
@@ -223,7 +223,8 @@ def process_transcription(transcription_lines: List[str]):
         start_time = float(parts[0])
         end_time = float(parts[1])
         if (end_time - start_time) < 0.5:
-            print(f"skipping segment of length {start_time - end_time}")
+            if verbose:
+                print(f"skipping segment of length {start_time - end_time}")
             continue
         speaker_and_text = parts[2].split(':')
         speaker = speaker_and_text[0].split()[-1]
@@ -249,7 +250,8 @@ class WhisperModelWrapper():
         mel = whisper.log_mel_spectrogram(audio).to(self.whisper_model.device)
         mel = mel[None, :, :]
         self.whisper_model.embed_audio(mel)  # self.encoder.forward(mel)
-        print("encoder states:", self.whisper_model.encoder.encoder_states)
+        if self.verbose:
+            print("encoder states:", self.whisper_model.encoder.encoder_states)
 
     def get_audio_segments(self, audio_file: str, prompt: str = ""):
         """
@@ -346,8 +348,9 @@ class PyannoteEmbeddingDiarizer():
         hypothesis = get_annotation(speaker_segments, kmeans.labels_)
         print(''.join(predicted_labelled_transcription))
         print(hypothesis.to_rttm())
-        print("DER = {0:.3f}".format(self.metric(reference, hypothesis)))
-        return hypothesis
+        der = self.metric(reference, hypothesis)
+        print("DER = {0:.3f}".format(der))
+        return hypothesis, der
 
 if __name__ == "__main__":
   audio_file = "../tests/melzh/hailey-bieber-interview.mp3"
