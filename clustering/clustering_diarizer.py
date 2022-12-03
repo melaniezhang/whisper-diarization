@@ -297,25 +297,22 @@ class WhisperModelWrapper():
         return (mfcc, intervals_s)
 
 class PyannoteEmbeddingDiarizer():
-    def __init__(self, dataset_prefix: str, segmenting_strategy: str, verbose=True):
+    def __init__(self, segmenting_strategy: str, verbose=True):
         from pyannote.audio import Model
         self.pyannote_model = Model.from_pretrained("pyannote/embedding",
                                                use_auth_token="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")
         self.verbose = verbose
-        self.dataset_prefix = dataset_prefix
         self.whisper_model_wrapper: WhisperModelWrapper = WhisperModelWrapper(verbose=verbose)
         if segmenting_strategy not in ['GROUND_TRUTH', 'WHISPER_BASE']:
             raise RuntimeError(f"Invalid segmenting strategy: {segmenting_strategy}")
         self.segmenting_strategy = segmenting_strategy
         self.metric = DiarizationErrorRate()
 
-    def k_means_diarize_meeting(self, meeting_name: str, path_prefix=None):
-        if path_prefix is None:
-            path_prefix = self.dataset_prefix
-        audio_path = f'{path_prefix}/{meeting_name}.wav'
+    def k_means_diarize_meeting(self, meeting_name: str, audio_path_prefix: str, transcription_path_prefix: str):
+        audio_path = f'{audio_path_prefix}/{meeting_name}.wav'
         audio_file = Audio().validate_file(audio_path)
         audio_length = Audio().get_duration(audio_file)
-        transcription_path = f'{path_prefix}/{meeting_name}.txt'
+        transcription_path = f'{transcription_path_prefix}/{meeting_name}.txt'
         with open(transcription_path, 'r') as transcription:
             transcription_lines = transcription.readlines()
         speaker_segments, reference, n_speakers = process_transcription(transcription_lines)
@@ -356,11 +353,11 @@ if __name__ == "__main__":
   audio_file = "../tests/melzh/hailey-bieber-interview.mp3"
   if IS_COLAB:
       audio_file = '/content/drive/MyDrive/cs229-final-project/whisper-diarization/tests/melzh/hailey-bieber-interview.mp3'
-  diarizer = ClusteringDiarizer(verbose=True)
-  diarizer.predict_kmeans(audio_file)
+  # diarizer = ClusteringDiarizer(verbose=True)
+  # diarizer.predict_kmeans(audio_file)
   # print(diarizer.predict_kmeans_meeting("IS1009a-0"))
-  # pyannote_diarizer = PyannoteEmbeddingDiarizer(dataset_prefix='/Users/melaniezhang/Desktop/for_andrew', segmenting_strategy="WHISPER_BASE")
-  # pyannote_diarizer.k_means_diarize_meeting("IS1009a-0")
-  # pyannote_diarizer.k_means_diarize_meeting("IS1008a-2")
-  # print(abs(pyannote_diarizer.metric))
+  pyannote_diarizer = PyannoteEmbeddingDiarizer(segmenting_strategy="WHISPER_BASE")
+  pyannote_diarizer.k_means_diarize_meeting("IS1009a-0", audio_path_prefix='/Users/melaniezhang/Desktop/for_andrew', transcription_path_prefix='/Users/melaniezhang/Desktop/for_andrew')
+  pyannote_diarizer.k_means_diarize_meeting("IS1008a-2", audio_path_prefix='/Users/melaniezhang/Desktop/for_andrew', transcription_path_prefix='/Users/melaniezhang/Desktop/for_andrew')
+  print(abs(pyannote_diarizer.metric))
 
