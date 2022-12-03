@@ -1,12 +1,14 @@
 import sys
 
 import librosa
+import pyannote.core
 import torch
+from pyannote.audio.core.io import AudioFile, Audio
 from pyannote.metrics.diarization import DiarizationErrorRate
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 import numpy as np
-from typing import List
+from typing import List, Union
 
 import whisper
 import matplotlib.pyplot as plt
@@ -18,11 +20,12 @@ SAMPLE_RATE = 22050
 IS_COLAB = "google.colab" in sys.modules
 
 class AudioSegment():
-    def __init__(self, mel: torch.Tensor, start_time: float, end_time: float, text: str):
+    def __init__(self, mel: Union[torch.Tensor, None], start_time: float, end_time: float, text: str, speaker: str = None):
         self.mel = mel
         self.start_time = start_time
         self.end_time = end_time
         self.text = text
+        self.speaker = speaker
 
 def time_to_idx(time: float):
     """
@@ -67,7 +70,7 @@ def get_mfccs(audio_file: str):
     return (mfcc, intervals_s)
 
 
-def get_annotation(segments: List[AudioSegment], speaker_labels: List[int], file_id: str):
+def get_annotation(segments: List[AudioSegment], speaker_labels: List[int]):
     hypothesis = Annotation()
     for segment, label in zip(segments, speaker_labels):
         hypothesis[Segment(segment.start_time, segment.end_time)] = str(label)
@@ -96,7 +99,7 @@ def process_rttm(rttm_file):
     return hypothesis, speaker_num
 
 class ClusteringDiarizer():
-    def __init__(self, verbose=False):
+    def __init__(self, verbose=True):
         self.whisper_model = whisper.load_model("small")
         self.verbose = verbose
 
@@ -119,6 +122,7 @@ class ClusteringDiarizer():
         else:
             transcribe_result = whisper.transcribe(self.whisper_model, audio_file)
         print("finished transcribing using Whisper model!")
+
         mel = transcribe_result['mel']
         for segment in transcribe_result['segments']:
             start_idx = time_to_idx(segment['start'])
@@ -196,7 +200,7 @@ class ClusteringDiarizer():
         for segment_label in segments_with_labels:
             segment, label = segment_label
             print(f"[{segment.start_time}-{segment.end_time}] Speaker {label}: {segment.text}")
-      output_annotation = get_annotation(segments, kmeans.labels_, audio_file)
+      output_annotation = get_annotation(segments, kmeans.labels_)
       if (self.verbose):
         print(output_annotation.to_rttm())
       return output_annotation
@@ -207,10 +211,153 @@ class ClusteringDiarizer():
         """
         pass
 
+
+def process_transcription(transcription_lines: List[str]):
+    # returns AudioSegment list, speaker_num, and pyannote.Annotation from the transcription lines
+    annotation = Annotation()
+    segments = []
+    speakers = {}
+    speaker_num = 0
+    for line in transcription_lines:
+        parts = line.split('|')
+        start_time = float(parts[0])
+        end_time = float(parts[1])
+        if (end_time - start_time) < 0.5:
+            print(f"skipping segment of length {start_time - end_time}")
+            continue
+        speaker_and_text = parts[2].split(':')
+        speaker = speaker_and_text[0].split()[-1]
+        if speaker not in speakers:
+            speakers[speaker] = speaker_num
+            speaker_num += 1
+        speaker_id = speakers[speaker]
+        text = speaker_and_text[1]
+        annotation[Segment(start_time, end_time)] = str(speaker_id)
+        segments.append(AudioSegment(None, start_time, end_time, text, str(speaker_id)))
+    if len(segments) != len(annotation.get_timeline().segments_list_):
+        raise RuntimeError("Number of segments are not equal :(")
+    return segments, annotation, speaker_num
+
+class WhisperModelWrapper():
+    def __init__(self, verbose=True):
+        self.whisper_model = whisper.load_model("small")
+        self.verbose = verbose
+
+    def get_encoder_blocks(self, audio_file: str):
+        audio = whisper.load_audio(audio_file)
+        audio = whisper.pad_or_trim(audio)
+        mel = whisper.log_mel_spectrogram(audio).to(self.whisper_model.device)
+        mel = mel[None, :, :]
+        self.whisper_model.embed_audio(mel)  # self.encoder.forward(mel)
+        print("encoder states:", self.whisper_model.encoder.encoder_states)
+
+    def get_audio_segments(self, audio_file: str, prompt: str = ""):
+        """
+        Returns list of AudioSegments obtained by transcribing the given audio using a Whisper model.
+        Each audio segment consists of the log-Mel spectrogram segment corresponding to the start & end times
+        """
+        segment_list = []
+        if prompt:
+            transcribe_result = whisper.transcribe(self.whisper_model, audio_file, prompt=prompt)
+        else:
+            transcribe_result = whisper.transcribe(self.whisper_model, audio_file)
+        print("finished transcribing using Whisper model! Transcription below")
+        mel = transcribe_result['mel']
+        for segment in transcribe_result['segments']:
+            start_idx = time_to_idx(segment['start'])
+            end_idx = time_to_idx(segment['end'])
+            audio_segment = AudioSegment(mel[:, start_idx:end_idx], segment['start'], segment['end'], segment['text'])
+            segment_list.append(audio_segment)
+            if self.verbose:
+                print(f"[{audio_segment.start_time}-{audio_segment.end_time}] {audio_segment.text}")
+        return segment_list
+
+    def get_mfccs(self, audio_file: str):
+        """
+        Returns tuple (mfccs, intervals_s)
+        where mfccs is a tensor of shape (n_mfcc, n_frames)
+        and intervals is a list of length n_frames (mapping mfccs[i] to its start second)
+        """
+        y, sr = librosa.load(audio_file)
+
+        hop_length = 512  # number of samples between successive frames
+        mfcc = librosa.feature.mfcc(y=y, n_mfcc=13, sr=sr, hop_length=hop_length)
+
+        audio_length = len(y) / sr  # in seconds
+        step = hop_length / sr  # in seconds
+        intervals_s = np.arange(start=0, stop=audio_length, step=step)
+        if (self.verbose):
+          print(f'audio length: {audio_length}')
+          print(f'MFCC shape: {mfcc.shape}')
+          print(f'intervals_s shape: {intervals_s.shape}')
+          print(f'First 5 intervals: {intervals_s[:5]}')
+          print(f'Last 5 intervals: {intervals_s[len(intervals_s) - 5:]}')
+        return (mfcc, intervals_s)
+
+class PyannoteEmbeddingDiarizer():
+    def __init__(self, dataset_prefix: str, segmenting_strategy: str, verbose=True):
+        from pyannote.audio import Model
+        self.pyannote_model = Model.from_pretrained("pyannote/embedding",
+                                               use_auth_token="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")
+        self.verbose = verbose
+        self.dataset_prefix = dataset_prefix
+        self.whisper_model_wrapper: WhisperModelWrapper = WhisperModelWrapper(verbose=verbose)
+        if segmenting_strategy not in ['GROUND_TRUTH', 'WHISPER_BASE']:
+            raise RuntimeError(f"Invalid segmenting strategy: {segmenting_strategy}")
+        self.segmenting_strategy = segmenting_strategy
+        self.metric = DiarizationErrorRate()
+
+    def k_means_diarize_meeting(self, meeting_name: str, path_prefix=None):
+        if path_prefix is None:
+            path_prefix = self.dataset_prefix
+        audio_path = f'{path_prefix}/{meeting_name}.wav'
+        audio_file = Audio().validate_file(audio_path)
+        audio_length = Audio().get_duration(audio_file)
+        transcription_path = f'{path_prefix}/{meeting_name}.txt'
+        with open(transcription_path, 'r') as transcription:
+            transcription_lines = transcription.readlines()
+        speaker_segments, reference, n_speakers = process_transcription(transcription_lines)
+
+        # segment the audio.
+        if self.segmenting_strategy == 'GROUND_TRUTH':
+            pass
+        elif self.segmenting_strategy == 'WHISPER_BASE':
+            speaker_segments = self.whisper_model_wrapper.get_audio_segments(audio_path)
+            print(f"returned {len(speaker_segments)} speaker segments")
+        if self.verbose:
+            print(f"num speakers : {n_speakers}")
+            print(f"annotation RTTM:\n{reference.to_rttm()}")
+            print(f"transcription:\n{''.join(transcription_lines)}")
+        from pyannote.audio import Inference
+        inference = Inference(self.pyannote_model, window="whole")
+
+        features = []
+        for audio_segment in speaker_segments:
+            if audio_segment.end_time > audio_length:
+                audio_segment.end_time = audio_length
+            features.append(inference.crop(audio_file, Segment(audio_segment.start_time, audio_segment.end_time)))
+        kmeans = KMeans(n_clusters=n_speakers, random_state=42)
+        kmeans.fit(features)
+        segments_with_labels = zip(speaker_segments, kmeans.labels_)
+        predicted_labelled_transcription = []
+        for segment_label in segments_with_labels:
+            segment, label = segment_label
+            predicted_labelled_transcription.append(f"[{segment.start_time}-{segment.end_time}] Speaker {label}: {segment.text}")
+        hypothesis = get_annotation(speaker_segments, kmeans.labels_)
+        print(''.join(predicted_labelled_transcription))
+        print(hypothesis.to_rttm())
+        print("DER = {0:.3f}".format(self.metric(reference, hypothesis)))
+        return hypothesis
+
 if __name__ == "__main__":
   audio_file = "../tests/melzh/hailey-bieber-interview.mp3"
   if IS_COLAB:
       audio_file = '/content/drive/MyDrive/cs229-final-project/whisper-diarization/tests/melzh/hailey-bieber-interview.mp3'
   diarizer = ClusteringDiarizer(verbose=True)
-  # diarizer.predict_kmeans(audio_file)
-  print(diarizer.predict_kmeans_meeting("IS1009a-0"))
+  diarizer.predict_kmeans(audio_file)
+  # print(diarizer.predict_kmeans_meeting("IS1009a-0"))
+  # pyannote_diarizer = PyannoteEmbeddingDiarizer(dataset_prefix='/Users/melaniezhang/Desktop/for_andrew', segmenting_strategy="WHISPER_BASE")
+  # pyannote_diarizer.k_means_diarize_meeting("IS1009a-0")
+  # pyannote_diarizer.k_means_diarize_meeting("IS1008a-2")
+  # print(abs(pyannote_diarizer.metric))
+
