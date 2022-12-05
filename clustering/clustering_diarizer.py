@@ -155,13 +155,12 @@ class ClusteringDiarizer():
           print(f'Last 5 intervals: {intervals_s[len(intervals_s) - 5:]}')
         return (mfcc, intervals_s)
 
-    def predict_kmeans_meeting(self, meeting_name:str):
+    def predict_kmeans_meeting(self, meeting_name:str,  dataset_path_prefix: str):
         metric = DiarizationErrorRate()
         # replace w/ folder u save the files to
-        path_prefix = '/Users/melaniezhang/Desktop/for_andrew'
-        rttm_file = f'{path_prefix}/{meeting_name}.rttm'
-        audio_path = f'{path_prefix}/{meeting_name}.wav'
-        transcription_path = f'{path_prefix}/{meeting_name}.txt'
+        rttm_file = f'{dataset_path_prefix}/rttm/{meeting_name}.rttm'
+        audio_path = f'{dataset_path_prefix}/audio/{meeting_name}.wav'
+        transcription_path = f'{dataset_path_prefix}/transcriptions/{meeting_name}.txt'
         with open(transcription_path, 'r') as transcription:
           print("ground truth transcription:\n", transcription.read())
         reference, n_speakers = process_rttm(rttm_file)
