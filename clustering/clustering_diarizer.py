@@ -162,11 +162,16 @@ class ClusteringDiarizer():
         audio_path = f'{dataset_path_prefix}/audio/{meeting_name}.wav'
         transcription_path = f'{dataset_path_prefix}/transcriptions/{meeting_name}.txt'
         with open(transcription_path, 'r') as transcription:
-          print("ground truth transcription:\n", transcription.read())
+            if self.verbose:
+                print("ground truth transcription:\n", transcription.read())
         reference, n_speakers = process_rttm(rttm_file)
-        print(f"numspeakers : {n_speakers}")
+        if self.verbose:
+            print(f"numspeakers : {n_speakers}")
         hypothesis = self.predict_kmeans(audio_path, num_speakers=n_speakers)
-        print("DER = {0:.3f}".format(metric(reference, hypothesis)))
+        der = metric(reference, hypothesis)
+        if self.verbose:
+            print("DER = {0:.3f}".format(der))
+        return hypothesis, der
 
     def predict_kmeans(self, audio_file: str, num_speakers=2, method="AVERAGE_POOL"):
       """
