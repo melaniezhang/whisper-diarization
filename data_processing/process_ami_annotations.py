@@ -2,12 +2,11 @@ import collections
 import re
 import os
 
-MAX_TIME_LIMIT = 300.0
 WORDS_DIRECTORY = "/Users/melaniezhang/Downloads/ami_public_manual_1.6.2/words/"
 MEETINGS_LIST_FILE = "/Users/melaniezhang/whisper-diarization/data_processing/files.txt"
 TRANSCRIPTIONS_OUT_DIR = "/Users/melaniezhang/whisper-diarization/data/ami/transcriptions/"
 
-def produce_transcription(file_list, speakers, out_file, end_time_limit=300.0):
+def produce_transcription(file_list, speakers, out_file):
 	# given a list of words files (AMI meeting annotations) and a list of speaker names, parse the words files
 	# for each speaker and combine the output into one text file.
 	class SpeechSegment:
@@ -48,6 +47,8 @@ def produce_transcription(file_list, speakers, out_file, end_time_limit=300.0):
 					if 'punc' not in line:
 						endtime = float(elements[1])
 						starttime = float(elements[2])
+						if starttime > endtime:
+							starttime, endtime = endtime, starttime
 						segment = SpeechSegment(speakers[n], starttime, endtime, text)
 						word_times[starttime] = segment
 						prev_timestamp = starttime
@@ -69,27 +70,16 @@ def produce_transcription(file_list, speakers, out_file, end_time_limit=300.0):
 	for key in word_times_sorted[1:]:
 		if word_times[key].speaker == current_segment.speaker:
 			current_segment.text += " " + word_times[key].text
-			current_segment.endtime = word_times[key].endtime
+			current_segment.endtime = max(word_times[key].endtime, current_segment.endtime)
 		else:
 			segment_list.append(current_segment)
 			current_segment = word_times[key]
-	end_idx = 1
-	if end_time_limit is not None:
-		for end_idx in range(len(segment_list)):
-			if segment_list[end_idx].endtime > end_time_limit:
-				break
-			end_idx += 1
-	else:
-		end_idx = len(segment_list)
-	print(f"truncated transcription to {segment_list[end_idx-1].endtime}")
-
 
 	def stringify_for_transcription(segment: SpeechSegment):
-		return f'Speaker {segment.speaker}: {segment.text}\n'
+		return f'{segment.starttime}|{segment.endtime}| Speaker {segment.speaker}: {segment.text}\n'
 
-	#The output file you want to write the final conversation to
 	file = open(out_file,"w")
-	file.writelines([stringify_for_transcription(line) for line in segment_list[:end_idx]])
+	file.writelines([stringify_for_transcription(line) for line in segment_list])
 	file.close()
 	print(f"Transcription done! Written to file {out_file}")
 
@@ -109,4 +99,5 @@ for meeting in meeting_list:
 	for file, speaker, full_path in filenames_map[meeting.strip()]:
 		file_list.append(full_path)
 		speaker_list.append(speaker)
-	produce_transcription(file_list, speaker_list, f"{TRANSCRIPTIONS_OUT_DIR}/{meeting}.txt", end_time_limit=MAX_TIME_LIMIT)
+	produce_transcription(file_list, speaker_list, f"{TRANSCRIPTIONS_OUT_DIR}/{meeting}.txt")
+
